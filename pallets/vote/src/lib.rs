@@ -16,30 +16,58 @@ mod benchmarking;
 
 #[frame_support::pallet]
 pub mod pallet {
-	use frame_support::pallet_prelude::*;
+	use frame_support::pallet_prelude::{*, ValueQuery};
 	use frame_system::pallet_prelude::*;
+
+	use frame_support::traits::{Currency, ExistenceRequirement, WithdrawReasons};
+
+	use sp_runtime::traits::Zero;
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+
+		type Currency: Currency<Self::AccountId>;
+
+		type PostDeposit: Get<BalanceOf<Self>>;
 	}
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
 	pub struct Pallet<T>(_);
 
-	// The pallet's runtime storage items.
-	// https://docs.substrate.io/v3/runtime/storage
-	#[pallet::storage]
-	#[pallet::getter(fn something)]
-	// Learn more about declaring storage items:
-	// https://docs.substrate.io/v3/runtime/storage#declaring-storage-items
-	pub type Something<T> = StorageValue<_, u32>;
+	/// Simple index for identifying a fund.
+	pub type IdeaIndex = u32;
 
-	// Pallets use events to inform users when important changes are made.
-	// https://docs.substrate.io/v3/runtime/events-and-errors
+	type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
+	type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
+	type IdeaOf<T> = Idea<AccountIdOf<T>, BalanceOf<T>, <T as frame_system::Config>::BlockNumber>;
+
+	#[derive(Encode, Decode, Default, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+	#[cfg_attr(feature = "std", derive(Debug))]
+	pub struct Idea<AccountId, Balance, BlockNumber> {
+		/// 
+		inventor: AccountId,
+		/// The amount of deposit placed
+		pre_deposit: Balance,
+		/// The total amount raised
+		voted_number: u32,
+		/// Block number after which funding must have succeeded
+		end: BlockNumber,
+		/// Upper bound on `raised`
+		goal: Balance,
+	}
+
+	#[pallet::storage]
+	#[pallet::getter(fn ideas)]
+	pub type Ideas<T> = StorageMap<_, Blake2_128Concat, IdeaIndex, IdeaOf<T>, ValueQuery>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn idea_count)]
+	pub type IdeaCount<T> = StorageValue<_, IdeaIndex, ValueQuery>;
+
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
@@ -62,17 +90,35 @@ pub mod pallet {
 	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// An example dispatchable that takes a singles value as a parameter, writes the value to
-		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
-		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
-		pub fn do_something(origin: OriginFor<T>, something: u32) -> DispatchResult {
-			// Check that the extrinsic was signed and get the signer.
-			// This function will return an error if the extrinsic is not signed.
-			// https://docs.substrate.io/v3/runtime/origins
-			let who = ensure_signed(origin)?;
 
-			// Update storage.
-			<Something<T>>::put(something);
+		#[pallet::weight(10_000)]
+		pub fn post(origin: OriginFor<T>, end: T::BlockNumber, goal: BalanceOf<T>) -> DispatchResult {
+			// Check that the extrinsic was signed and get the signer.
+			let drafter = ensure_signed(origin)?;
+
+			// get pre deposit
+			let pre_deposit = T::PostDeposit::get();
+
+			// withdraw pre deposit
+			let imb = T::Currency::withdraw(
+				&drafter,
+				pre_deposit,
+				WithdrawReasons::TRANSFER,
+				ExistenceRequirement::AllowDeath,
+			)?;
+
+			let index = <IdeaCount<T>>::get();
+
+			<IdeaCount<T>>::put(index.saturating_add(1));
+
+			// transfer fee to another pool
+			T::Currency::resolve_creating(&Self::fund_account_id(index), imb);
+
+			// register idea
+			<Ideas<T>>::insert(
+				index,
+				Idea { inventor: drafter, pre_deposit, voted_number: Zero::zero(), end, goal },
+			);
 
 			// Emit an event.
 			Self::deposit_event(Event::SomethingStored(something, who));
